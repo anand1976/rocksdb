@@ -217,7 +217,8 @@ Status SeekToPropertiesBlock(InternalIterator* meta_iter, bool* is_found) {
 // Return true if it successfully seeks to that block.
 Status SeekToCompressionDictBlock(InternalIterator* meta_iter, bool* is_found,
                                   BlockHandle* block_handle) {
-  return SeekToMetaBlock(meta_iter, kCompressionDictBlock, is_found, block_handle);
+  return SeekToMetaBlock(meta_iter, kCompressionDictBlock, is_found,
+                         block_handle);
 }
 
 Status SeekToRangeDelBlock(InternalIterator* meta_iter, bool* is_found,
