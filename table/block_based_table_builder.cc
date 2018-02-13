@@ -299,7 +299,7 @@ struct BlockBasedTableBuilder::Rep {
                       ? std::min(table_options.block_size, kDefaultPageSize)
                       : 0),
         data_block(table_options.block_restart_interval,
-                   table_options.use_delta_encoding, alignment),
+                   table_options.use_delta_encoding),
         range_del_block(1),  // TODO(andrewkr): restart_interval unnecessary
         internal_prefix_transform(_ioptions.prefix_extractor),
         compression_type(_compression_type),
@@ -379,10 +379,6 @@ BlockBasedTableBuilder::BlockBasedTableBuilder(
         table_options.block_cache_compressed.get(), file->writable_file(),
         &rep_->compressed_cache_key_prefix[0],
         &rep_->compressed_cache_key_prefix_size);
-  }
-
-  if (table_options.block_align) {
-    zero_block_.append(kDefaultPageSize, 0);
   }
 }
 
@@ -595,13 +591,8 @@ void BlockBasedTableBuilder::WriteRawBlock(const Slice& block_contents,
             (r->alignment - ((block_contents.size() + kBlockTrailerSize) &
                              (r->alignment - 1))) &
             (r->alignment - 1);
-        if (!r->file->use_direct_io()) {
-          r->status = r->file->Append(Slice(zero_block_.data(), pad_bytes));
-          if (r->status.ok()) {
-            r->offset += pad_bytes;
-          }
-        } else {
-          // The file writer will automatically pad to page alignment
+        r->status = r->file->Pad(pad_bytes);
+        if (r->status.ok()) {
           r->offset += pad_bytes;
         }
       }

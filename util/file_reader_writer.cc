@@ -219,6 +219,64 @@ Status WritableFileWriter::Append(const Slice& data) {
   return s;
 }
 
+Status WritableFileWriter::Pad(const size_t pad_bytes) {
+  size_t left = pad_bytes;
+  Status s;
+  pending_sync_ = true;
+
+  {
+    IOSTATS_TIMER_GUARD(prepare_write_nanos);
+    writable_file_->PrepareWrite(static_cast<size_t>(GetFileSize()), left);
+  }
+
+  // See whether we need to enlarge the buffer to avoid the flush
+  if (buf_.Capacity() - buf_.CurrentSize() < left) {
+    for (size_t cap = buf_.Capacity();
+         cap < max_buffer_size_;  // There is still room to increase
+         cap *= 2) {
+      // See whether the next available size is large enough.
+      // Buffer will never be increased to more than max_buffer_size_.
+      size_t desired_capacity = std::min(cap * 2, max_buffer_size_);
+      if (desired_capacity - buf_.CurrentSize() >= left ||
+          (use_direct_io() && desired_capacity == max_buffer_size_)) {
+        buf_.AllocateNewBuffer(desired_capacity, true);
+        break;
+      }
+    }
+  }
+
+  // Flush only when buffered I/O
+  if (!use_direct_io() && (buf_.Capacity() - buf_.CurrentSize()) < left) {
+    if (buf_.CurrentSize() > 0) {
+      s = Flush();
+      if (!s.ok()) {
+        return s;
+      }
+    }
+    assert(buf_.CurrentSize() == 0);
+  }
+
+  // We never write directly to disk with direct I/O on.
+  // or we simply use it for its original purpose to accumulate many small
+  // chunks
+  while (left > 0) {
+    buf_.PadWith(pad_bytes, 0);
+    left -= pad_bytes;
+
+    if (left > 0) {
+      s = Flush();
+      if (!s.ok()) {
+        break;
+      }
+    }
+  }
+
+  if (s.ok()) {
+    filesize_ += pad_bytes;
+  }
+  return s;
+}
+
 Status WritableFileWriter::Close() {
 
   // Do not quit immediately on failure the file MUST be closed

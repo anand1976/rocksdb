@@ -21,7 +21,7 @@ class BlockBuilder {
   void operator=(const BlockBuilder&) = delete;
 
   explicit BlockBuilder(int block_restart_interval,
-                        bool use_delta_encoding = true, size_t alignment = 0);
+                        bool use_delta_encoding = true);
 
   // Reset the contents as if the BlockBuilder was just constructed.
   void Reset();
@@ -57,7 +57,6 @@ class BlockBuilder {
   int                   counter_;   // Number of entries emitted since restart
   bool                  finished_;  // Has Finish() been called?
   std::string           last_key_;
-  size_t alignment_;
 };
 
 }  // namespace rocksdb

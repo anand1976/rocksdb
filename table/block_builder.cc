@@ -42,14 +42,12 @@
 
 namespace rocksdb {
 
-BlockBuilder::BlockBuilder(int block_restart_interval, bool use_delta_encoding,
-                           size_t alignment)
+BlockBuilder::BlockBuilder(int block_restart_interval, bool use_delta_encoding)
     : block_restart_interval_(block_restart_interval),
       use_delta_encoding_(use_delta_encoding),
       restarts_(),
       counter_(0),
-      finished_(false),
-      alignment_(alignment) {
+      finished_(false) {
   assert(block_restart_interval_ >= 1);
   restarts_.push_back(0);       // First restart point is at offset 0
   estimate_ = sizeof(uint32_t) + sizeof(uint32_t);
@@ -77,9 +75,6 @@ size_t BlockBuilder::EstimateSizeAfterKV(const Slice& key, const Slice& value)
   estimate += VarintLength(key.size()); // varint for key length.
   estimate += VarintLength(value.size()); // varint for value length.
 
-  if (alignment_) {
-    estimate += kBlockTrailerSize;
-  }
   return estimate;
 }
 
