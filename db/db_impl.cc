@@ -251,7 +251,6 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
 
 Status DBImpl::Resume() {
   ROCKS_LOG_INFO(immutable_db_options_.info_log, "Resuming DB");
-
   InstrumentedMutexLock db_mutex(&mutex_);
 
   if (!error_handler_.IsDBStopped() && !error_handler_.IsBGWorkStopped()) {
