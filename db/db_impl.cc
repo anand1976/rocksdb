@@ -247,12 +247,11 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
   // we won't drop any deletion markers until SetPreserveDeletesSequenceNumber()
   // is called by client and this seqnum is advanced.
   preserve_deletes_seqnum_.store(0);
-
-  error_handler_.reset(new ErrorHandler(immutable_db_options_, &mutex_));
 }
 
 Status DBImpl::Resume() {
   ROCKS_LOG_INFO(immutable_db_options_.info_log, "Resuming DB");
+
   InstrumentedMutexLock db_mutex(&mutex_);
 
   if (!error_handler_.IsDBStopped() && !error_handler_.IsBGWorkStopped()) {
