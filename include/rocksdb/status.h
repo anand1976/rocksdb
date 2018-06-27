@@ -26,7 +26,7 @@ class Status {
  public:
   // Create a success status.
   Status() : code_(kOk), subcode_(kNone), sev_(kNoError), state_(nullptr) {}
-  ~Status() { free(void *) state_; }
+  ~Status() { free((void *) state_); }
 
   // Copy the specified status.
   Status(const Status& s);
