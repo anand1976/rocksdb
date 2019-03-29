@@ -3,6 +3,8 @@
 ### Unreleased
 ### New Features
 * When reading from option file/string/map, customized comparators and/or merge operators can be filled according to object registry.
+* WAL files are subjected to rate limited deletion.
+* Blob files are deleted in foreground or background based on trash to DB size ratio, instead of always deleted in the background.
 
 ## 6.1.0 (3/27/2019)
 ### New Features

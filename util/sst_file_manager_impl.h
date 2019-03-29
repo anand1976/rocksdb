@@ -72,6 +72,17 @@ class SstFileManagerImpl : public SstFileManager {
                                const std::vector<CompactionInputFiles>& inputs,
                                Status bg_error);
 
+  // Register/De-register atomic size counters for stacked DBs using this
+  // instance of SstFileManagerImpl. This is used to allow SFM to calculate
+  // the total DB size for Blob DB. Since Blob files keep growing, in order
+  // to accurately track the size we need to know the current file size. Since
+  // Blob DB already keeps track of the total blob size, we simply keep a
+  // pointer to that counter and read it when needed (which happens to be in
+  // GetTotalSize()
+  void RegisterStackedDB(std::string dbname,
+                         std::atomic<uint64_t>* size_counter);
+  void UnregisterStackedDB(std::string dbname);
+
   // Bookkeeping so total_file_sizes_ goes back to normal after compaction
   // finishes
   void OnCompactionCompletion(Compaction* c);
@@ -182,6 +193,10 @@ class SstFileManagerImpl : public SstFileManager {
   std::list<ErrorHandler*> error_handler_list_;
   // Pointer to ErrorHandler instance that is currently processing recovery
   ErrorHandler* cur_instance_;
+  // Pointers to atomic size counters for stacked DBs that keep track of their
+  // own size - mostly BlobDB for now. We keep a map of DB name to pointer to
+  // atomic counter
+  std::unordered_map<std::string, std::atomic<uint64_t>*> stacked_db_sizes_;
 };
 
 }  // namespace rocksdb

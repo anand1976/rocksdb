@@ -107,6 +107,12 @@ Status BlobDBImpl::Close() {
   }
   closed_ = true;
 
+  SstFileManagerImpl* sfm = static_cast<SstFileManagerImpl*>(
+      db_impl_->immutable_db_options().sst_file_manager.get());
+  if (sfm != nullptr) {
+    sfm->UnregisterStackedDB(dbname_);
+  }
+
   // Close base DB before BlobDBImpl destructs to stop event listener and
   // compaction filter call.
   Status s = db_->Close();
@@ -185,6 +191,11 @@ Status BlobDBImpl::Open(std::vector<ColumnFamilyHandle*>* handles) {
   // Add trash files in blob dir to file delete scheduler.
   SstFileManagerImpl* sfm = static_cast<SstFileManagerImpl*>(
       db_impl_->immutable_db_options().sst_file_manager.get());
+  // Register the blob size counter with SFM so it can make rate limiting
+  // decisions based on the total DB size
+  if (sfm != nullptr) {
+    sfm->RegisterStackedDB(dbname_, &total_blob_size_);
+  }
   DeleteScheduler::CleanupDirectory(env_, sfm, blob_dir_);
 
   UpdateLiveSSTSize();
@@ -1756,7 +1767,7 @@ std::pair<bool, int64_t> BlobDBImpl::DeleteObsoleteFiles(bool aborted) {
 
     blob_files_.erase(bfile->BlobFileNumber());
     Status s = DeleteDBFile(&(db_impl_->immutable_db_options()),
-                             bfile->PathName(), blob_dir_, true);
+                             bfile->PathName(), blob_dir_);
     if (!s.ok()) {
       ROCKS_LOG_ERROR(db_options_.info_log,
                       "File failed to be deleted as obsolete %s",
@@ -1846,7 +1857,7 @@ Status DestroyBlobDB(const std::string& dbname, const Options& options,
     uint64_t number;
     FileType type;
     if (ParseFileName(f, &number, &type) && type == kBlobFile) {
-      Status del = DeleteDBFile(&soptions, blobdir + "/" + f, blobdir, true);
+      Status del = DeleteDBFile(&soptions, blobdir + "/" + f, blobdir);
       if (status.ok() && !del.ok()) {
         status = del;
       }
