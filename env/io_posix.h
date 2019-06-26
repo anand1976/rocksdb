@@ -94,6 +94,8 @@ class PosixRandomAccessFile : public RandomAccessFile {
   virtual Status Read(uint64_t offset, size_t n, Slice* result,
                       char* scratch) const override;
 
+  virtual Status MultiRead(ReadRequest* reqs, size_t num_reqs) override;
+
   virtual Status Prefetch(uint64_t offset, size_t n) override;
 
 #if defined(OS_LINUX) || defined(OS_MACOSX) || defined(OS_AIX)

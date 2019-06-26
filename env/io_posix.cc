@@ -458,6 +458,20 @@ Status PosixRandomAccessFile::Read(uint64_t offset, size_t n, Slice* result,
   return s;
 }
 
+Status PosixRandomAccessFile::MultiRead(ReadRequest* reqs, size_t num_reqs) {
+  assert(!use_direct_io());
+  for (size_t i = 0; i < num_reqs; ++i) {
+    Prefetch(reqs[i].offset, reqs[i].len);
+  }
+
+  for (size_t i = 0; i < num_reqs; ++i) {
+    reqs[i].status = Read(reqs[i].offset, reqs[i].len, &reqs[i].result,
+                       reqs[i].scratch);
+  }
+
+  return Status::OK();
+}
+
 Status PosixRandomAccessFile::Prefetch(uint64_t offset, size_t n) {
   Status s;
   if (!use_direct_io()) {
