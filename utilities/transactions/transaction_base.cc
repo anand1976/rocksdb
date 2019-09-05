@@ -636,9 +636,9 @@ void TransactionBaseImpl::TrackKey(TransactionKeyMap* key_map, uint32_t cfh_id,
 #ifdef __cpp_lib_unordered_map_try_emplace
   // use c++17's try_emplace if available, to avoid rehashing the key
   // in case it is not already in the map
-  auto result = cf_key_map.try_emplace(key, seq);
+  auto result = cf_key_map.try_emplace(key, TransactionKeyMapInfo(seq));
   auto iter = result.first;
-  if (!result.second && 
+  if (!result.second &&
       seq < iter->second.seq) {
     // Now tracking this key with an earlier sequence number
     iter->second.seq = seq;
@@ -646,7 +646,7 @@ void TransactionBaseImpl::TrackKey(TransactionKeyMap* key_map, uint32_t cfh_id,
 #else
   auto iter = cf_key_map.find(key);
   if (iter == cf_key_map.end()) {
-    auto result = cf_key_map.emplace(key, seq);
+    auto result = cf_key_map.emplace(key, TransactionKeyMapInfo(seq));
     iter = result.first;
   } else if (seq < iter->second.seq) {
     // Now tracking this key with an earlier sequence number
