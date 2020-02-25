@@ -289,6 +289,7 @@ function build_checkpoint {
             echo "Building checkpoints: $ORIGIN_PATH/$db_index -> $DB_PATH/$db_index ..."
             $cmd_prefix $DB_BENCH_DIR/ldb checkpoint --checkpoint_dir=$DB_PATH/$db_index \
                         --db=$ORIGIN_PATH/$db_index 2>&1
+            exit_on_error $?
         done
     else
         # checkpoint cannot build in directory already exists
@@ -296,6 +297,7 @@ function build_checkpoint {
         echo "Building checkpoint: $ORIGIN_PATH -> $DB_PATH ..."
         $cmd_prefix $DB_BENCH_DIR/ldb checkpoint --checkpoint_dir=$DB_PATH \
                     --db=$ORIGIN_PATH 2>&1
+        exit_on_error $?
     fi
 }
 
