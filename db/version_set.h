@@ -1446,7 +1446,8 @@ class VersionSet {
   // If an error occurs and recovery creates new memtables, SwitchMemtable
   // uses LastSequence() which may be lower than already-allocated sequences.
   void SyncLastSequenceWithAllocated() {
-    uint64_t alloc_seq = last_allocated_sequence_.load(std::memory_order_seq_cst);
+    uint64_t alloc_seq =
+        last_allocated_sequence_.load(std::memory_order_seq_cst);
     uint64_t last_seq = last_sequence_.load(std::memory_order_acquire);
     if (alloc_seq > last_seq) {
       last_sequence_.store(alloc_seq, std::memory_order_release);

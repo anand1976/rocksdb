@@ -11,7 +11,8 @@
 // are lower than sequence numbers in the old WAL files because:
 // 1. Writes allocate sequence numbers via FetchAddLastAllocatedSequence()
 // 2. Failed writes don't publish the sequence via SetLastSequence()
-// 3. New memtables/WALs use LastSequence() (published) not LastAllocatedSequence()
+// 3. New memtables/WALs use LastSequence() (published) not
+// LastAllocatedSequence()
 // 4. This causes "sequence number going backwards" on subsequent recovery
 
 #include <atomic>
@@ -104,9 +105,7 @@ class WritePreparedTransactionSeqnoTest : public ::testing::Test {
     return s;
   }
 
-  DBImpl* dbimpl() {
-    return static_cast_with_check<DBImpl>(db_->GetRootDB());
-  }
+  DBImpl* dbimpl() { return static_cast_with_check<DBImpl>(db_->GetRootDB()); }
 
  protected:
   TransactionDB* db_;
@@ -121,7 +120,8 @@ class WritePreparedTransactionSeqnoTest : public ::testing::Test {
 
 // This test reproduces the sequence number going backwards issue
 // that can occur during error recovery with WritePrepared transactions.
-TEST_F(WritePreparedTransactionSeqnoTest, SeqnoGoesBackwardsDuringErrorRecovery) {
+TEST_F(WritePreparedTransactionSeqnoTest,
+       SeqnoGoesBackwardsDuringErrorRecovery) {
   ASSERT_OK(Open());
 
   // Write some initial data and flush to establish baseline
@@ -152,8 +152,7 @@ TEST_F(WritePreparedTransactionSeqnoTest, SeqnoGoesBackwardsDuringErrorRecovery)
   // Set up to inject a retryable MANIFEST write error on the next flush
   // This simulates an IO error during MANIFEST write
   std::atomic<bool> inject_error{true};
-  IOStatus error_to_inject =
-      IOStatus::IOError("Injected MANIFEST write error");
+  IOStatus error_to_inject = IOStatus::IOError("Injected MANIFEST write error");
   error_to_inject.SetRetryable(true);
 
   SyncPoint::GetInstance()->SetCallBack(
@@ -168,20 +167,19 @@ TEST_F(WritePreparedTransactionSeqnoTest, SeqnoGoesBackwardsDuringErrorRecovery)
   std::atomic<bool> recovery_started{false};
   std::atomic<bool> recovery_completed{false};
   SyncPoint::GetInstance()->SetCallBack(
-      "RecoverFromRetryableBGIOError:BeforeStart", [&](void*) {
-        recovery_started.store(true);
-      });
+      "RecoverFromRetryableBGIOError:BeforeStart",
+      [&](void*) { recovery_started.store(true); });
   SyncPoint::GetInstance()->SetCallBack(
-      "RecoverFromRetryableBGIOError:RecoverSuccess", [&](void*) {
-        recovery_completed.store(true);
-      });
+      "RecoverFromRetryableBGIOError:RecoverSuccess",
+      [&](void*) { recovery_completed.store(true); });
 
   SyncPoint::GetInstance()->EnableProcessing();
 
   // Trigger a flush that will fail due to MANIFEST write error
   Status s = db_->Flush(FlushOptions());
   // The flush should fail with a soft/retryable error
-  ASSERT_TRUE(s.severity() == Status::kSoftError || s.IsIOError()) << s.ToString();
+  ASSERT_TRUE(s.severity() == Status::kSoftError || s.IsIOError())
+      << s.ToString();
 
   // Re-enable filesystem for recovery
   fault_fs_->SetFilesystemActive(true);
@@ -237,8 +235,9 @@ TEST_F(WritePreparedTransactionSeqnoTest, SeqnoGoesBackwardsDuringErrorRecovery)
   if (!reopen_s.ok()) {
     // Check if it's the specific error we're looking for
     std::string error_msg = reopen_s.ToString();
-    bool is_seqno_error = error_msg.find("Sequence number") != std::string::npos &&
-                          error_msg.find("backwards") != std::string::npos;
+    bool is_seqno_error =
+        error_msg.find("Sequence number") != std::string::npos &&
+        error_msg.find("backwards") != std::string::npos;
     if (reopen_s.IsCorruption() && is_seqno_error) {
       // Bug confirmed - the test passes by demonstrating the bug exists
       std::cout << "Bug confirmed: " << error_msg << std::endl;
@@ -264,7 +263,8 @@ TEST_F(WritePreparedTransactionSeqnoTest, SeqnoGoesBackwardsDuringErrorRecovery)
     // If we get here, the bug may not have been triggered in this run
     // This could happen due to timing or if the fix is already in place
     std::cout << "Note: Bug was not triggered in this test run. "
-              << "This may be due to timing or the fix being present." << std::endl;
+              << "This may be due to timing or the fix being present."
+              << std::endl;
   }
 
   Close();
@@ -347,7 +347,8 @@ TEST_F(WritePreparedTransactionSeqnoTest, SeqnoDiscrepancyDuringErrorRecovery) {
           VersionSet* vs = db_impl->GetVersionSet();
           if (vs) {
             last_seq_after_recovery.store(vs->LastSequence());
-            last_allocated_seq_after_recovery.store(vs->LastAllocatedSequence());
+            last_allocated_seq_after_recovery.store(
+                vs->LastAllocatedSequence());
             captured_seqs_after.store(true);
           }
         }
@@ -355,8 +356,8 @@ TEST_F(WritePreparedTransactionSeqnoTest, SeqnoDiscrepancyDuringErrorRecovery) {
 
   SyncPoint::GetInstance()->EnableProcessing();
 
-  // Write more transactions to create a gap between allocated and published seqs
-  // With two_write_queues=true, sequence numbers are allocated differently
+  // Write more transactions to create a gap between allocated and published
+  // seqs With two_write_queues=true, sequence numbers are allocated differently
   for (int i = 5; i < 10; i++) {
     Transaction* txn = db_->BeginTransaction(write_opts, txn_opts);
     ASSERT_NE(txn, nullptr);
@@ -463,7 +464,8 @@ TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
 
   // Get initial sequence numbers
   uint64_t initial_last_seq = dbimpl()->GetVersionSet()->LastSequence();
-  uint64_t initial_alloc_seq = dbimpl()->GetVersionSet()->LastAllocatedSequence();
+  uint64_t initial_alloc_seq =
+      dbimpl()->GetVersionSet()->LastAllocatedSequence();
   std::cout << "Initial state:" << std::endl;
   std::cout << "  LastSequence: " << initial_last_seq << std::endl;
   std::cout << "  LastAllocatedSequence: " << initial_alloc_seq << std::endl;
@@ -489,22 +491,20 @@ TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
       });
 
   SyncPoint::GetInstance()->SetCallBack(
-      "RecoverFromRetryableBGIOError:BeforeStart", [&](void*) {
-        recovery_started.store(true);
-      });
+      "RecoverFromRetryableBGIOError:BeforeStart",
+      [&](void*) { recovery_started.store(true); });
 
   // Capture sequences right before ResumeImpl is called
-  SyncPoint::GetInstance()->SetCallBack(
-      "DBImpl::ResumeImpl:Start", [&](void*) {
-        DBImpl* db_impl = dbimpl();
-        if (db_impl) {
-          VersionSet* vs = db_impl->GetVersionSet();
-          if (vs) {
-            seq_before_resume.store(vs->LastSequence());
-            alloc_seq_before_resume.store(vs->LastAllocatedSequence());
-          }
-        }
-      });
+  SyncPoint::GetInstance()->SetCallBack("DBImpl::ResumeImpl:Start", [&](void*) {
+    DBImpl* db_impl = dbimpl();
+    if (db_impl) {
+      VersionSet* vs = db_impl->GetVersionSet();
+      if (vs) {
+        seq_before_resume.store(vs->LastSequence());
+        alloc_seq_before_resume.store(vs->LastAllocatedSequence());
+      }
+    }
+  });
 
   // Capture sequences right after ResumeImpl syncs them (if fix is present)
   SyncPoint::GetInstance()->SetCallBack(
@@ -520,9 +520,8 @@ TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
       });
 
   SyncPoint::GetInstance()->SetCallBack(
-      "RecoverFromRetryableBGIOError:RecoverSuccess", [&](void*) {
-        recovery_completed.store(true);
-      });
+      "RecoverFromRetryableBGIOError:RecoverSuccess",
+      [&](void*) { recovery_completed.store(true); });
 
   SyncPoint::GetInstance()->EnableProcessing();
 
@@ -555,17 +554,21 @@ TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
   if (seq_before_resume.load() > 0) {
     std::cout << "Before ResumeImpl:" << std::endl;
     std::cout << "  LastSequence: " << seq_before_resume.load() << std::endl;
-    std::cout << "  LastAllocatedSequence: " << alloc_seq_before_resume.load() << std::endl;
+    std::cout << "  LastAllocatedSequence: " << alloc_seq_before_resume.load()
+              << std::endl;
     if (alloc_seq_before_resume.load() > seq_before_resume.load()) {
-      std::cout << "  Gap: " << (alloc_seq_before_resume.load() - seq_before_resume.load())
-                << " (this gap would cause corruption without fix)" << std::endl;
+      std::cout << "  Gap: "
+                << (alloc_seq_before_resume.load() - seq_before_resume.load())
+                << " (this gap would cause corruption without fix)"
+                << std::endl;
     }
   }
 
   if (seq_after_resume.load() > 0) {
     std::cout << "After ResumeImpl sync:" << std::endl;
     std::cout << "  LastSequence: " << seq_after_resume.load() << std::endl;
-    std::cout << "  LastAllocatedSequence: " << alloc_seq_after_resume.load() << std::endl;
+    std::cout << "  LastAllocatedSequence: " << alloc_seq_after_resume.load()
+              << std::endl;
     ASSERT_EQ(seq_after_resume.load(), alloc_seq_after_resume.load())
         << "Fix should have synced sequences";
   }
