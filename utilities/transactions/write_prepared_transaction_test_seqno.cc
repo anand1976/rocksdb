@@ -3,22 +3,17 @@
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
 
-// Test to verify sequence number consistency issue during error recovery
-// with WritePrepared/WriteUnprepared TransactionDB.
+// Test to verify that sequence numbers remain consistent during error recovery
+// with WritePrepared TransactionDB and two_write_queues=true.
 //
-// The bug: When a MANIFEST write error occurs during flush, error recovery
-// creates new WAL files. The new WAL files may have sequence numbers that
-// are lower than sequence numbers in the old WAL files because:
-// 1. Writes allocate sequence numbers via FetchAddLastAllocatedSequence()
-// 2. Failed writes don't publish the sequence via SetLastSequence()
-// 3. New memtables/WALs use LastSequence() (published) not
-// LastAllocatedSequence()
-// 4. This causes "sequence number going backwards" on subsequent recovery
+// The fix: SyncLastSequenceWithAllocated() is called during ResumeImpl to
+// ensure that allocated-but-not-published sequence numbers are accounted for
+// before creating new memtables/WALs, preventing "sequence number going
+// backwards" corruption on subsequent recovery.
 
 #include <atomic>
 #include <memory>
 #include <string>
-#include <thread>
 
 #include "db/db_impl/db_impl.h"
 #include "db/db_test_util.h"
@@ -77,14 +72,6 @@ class WritePreparedTransactionSeqnoTest : public ::testing::Test {
     return TransactionDB::Open(options_, txn_db_options_, dbname_, &db_);
   }
 
-  Status OpenWithColumnFamilies() {
-    std::vector<ColumnFamilyDescriptor> cf_descs;
-    cf_descs.emplace_back(kDefaultColumnFamilyName, options_);
-    cf_descs.emplace_back("cf1", options_);
-    return TransactionDB::Open(options_, txn_db_options_, dbname_, cf_descs,
-                               &handles_, &db_);
-  }
-
   void Close() {
     for (auto h : handles_) {
       if (h) {
@@ -94,15 +81,6 @@ class WritePreparedTransactionSeqnoTest : public ::testing::Test {
     handles_.clear();
     delete db_;
     db_ = nullptr;
-  }
-
-  Status CreateColumnFamily(const std::string& name) {
-    ColumnFamilyHandle* handle;
-    Status s = db_->CreateColumnFamily(options_, name, &handle);
-    if (s.ok()) {
-      handles_.push_back(handle);
-    }
-    return s;
   }
 
   DBImpl* dbimpl() { return static_cast_with_check<DBImpl>(db_->GetRootDB()); }
@@ -118,8 +96,8 @@ class WritePreparedTransactionSeqnoTest : public ::testing::Test {
   std::vector<ColumnFamilyHandle*> handles_;
 };
 
-// This test reproduces the sequence number going backwards issue
-// that can occur during error recovery with WritePrepared transactions.
+// Regression test: verify that after error recovery with two_write_queues,
+// the DB can be closed and reopened without sequence number corruption.
 TEST_F(WritePreparedTransactionSeqnoTest,
        SeqnoGoesBackwardsDuringErrorRecovery) {
   ASSERT_OK(Open());
@@ -149,131 +127,71 @@ TEST_F(WritePreparedTransactionSeqnoTest,
     delete txn;
   }
 
-  // Set up to inject a retryable MANIFEST write error on the next flush
-  // This simulates an IO error during MANIFEST write
-  std::atomic<bool> inject_error{true};
-  IOStatus error_to_inject = IOStatus::IOError("Injected MANIFEST write error");
+  // Set up sync point dependency chain for deterministic recovery
+  // synchronization, following the pattern from
+  // ManifestWriteRetryableErrorAutoRecover in error_handler_fs_test.cc.
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->LoadDependency(
+      {{"RecoverFromRetryableBGIOError:BeforeStart",
+        "SeqnoGoesBackwardsDuringErrorRecovery:0"},
+       {"SeqnoGoesBackwardsDuringErrorRecovery:1",
+        "RecoverFromRetryableBGIOError:BeforeWait1"},
+       {"RecoverFromRetryableBGIOError:RecoverSuccess",
+        "SeqnoGoesBackwardsDuringErrorRecovery:2"}});
+
+  // Inject a retryable MANIFEST write error on the next flush
+  IOStatus error_to_inject = IOStatus::IOError("Injected MANIFEST error");
   error_to_inject.SetRetryable(true);
-
   SyncPoint::GetInstance()->SetCallBack(
-      "VersionSet::LogAndApply:WriteManifest", [&](void*) {
-        if (inject_error.load()) {
-          inject_error.store(false);  // Only inject once
-          fault_fs_->SetFilesystemActive(false, error_to_inject);
-        }
-      });
-
-  // Set up to allow error recovery to proceed and complete
-  std::atomic<bool> recovery_started{false};
-  std::atomic<bool> recovery_completed{false};
-  SyncPoint::GetInstance()->SetCallBack(
-      "RecoverFromRetryableBGIOError:BeforeStart",
-      [&](void*) { recovery_started.store(true); });
-  SyncPoint::GetInstance()->SetCallBack(
-      "RecoverFromRetryableBGIOError:RecoverSuccess",
-      [&](void*) { recovery_completed.store(true); });
-
+      "VersionSet::LogAndApply:WriteManifest",
+      [&](void*) { fault_fs_->SetFilesystemActive(false, error_to_inject); });
   SyncPoint::GetInstance()->EnableProcessing();
 
   // Trigger a flush that will fail due to MANIFEST write error
   Status s = db_->Flush(FlushOptions());
-  // The flush should fail with a soft/retryable error
-  ASSERT_TRUE(s.severity() == Status::kSoftError || s.IsIOError())
-      << s.ToString();
+  ASSERT_NOK(s);
 
-  // Re-enable filesystem for recovery
+  // Wait for recovery to start, then re-enable filesystem and let it proceed
+  TEST_SYNC_POINT("SeqnoGoesBackwardsDuringErrorRecovery:0");
   fault_fs_->SetFilesystemActive(true);
+  SyncPoint::GetInstance()->ClearCallBack(
+      "VersionSet::LogAndApply:WriteManifest");
+  TEST_SYNC_POINT("SeqnoGoesBackwardsDuringErrorRecovery:1");
 
-  // Wait for error recovery to complete
-  // Error recovery will create new WAL files with potentially incorrect
-  // sequence numbers
-  int wait_count = 0;
-  while (!recovery_completed.load() && wait_count < 100) {
-    env_->SleepForMicroseconds(100000);  // 100ms
-    wait_count++;
-  }
-  ASSERT_TRUE(recovery_started.load()) << "Error recovery did not start";
-  // Note: recovery_completed may or may not be true depending on timing
-
+  // Wait for recovery to complete
+  TEST_SYNC_POINT("SeqnoGoesBackwardsDuringErrorRecovery:2");
   SyncPoint::GetInstance()->DisableProcessing();
-  SyncPoint::GetInstance()->ClearAllCallBacks();
 
   // Write some more data after recovery
-  // These writes go to new WAL files created during recovery
   for (int i = 20; i < 30; i++) {
     Transaction* txn = db_->BeginTransaction(write_opts, txn_opts);
-    if (txn == nullptr) {
-      break;  // DB might be in error state
-    }
-    Status put_s = txn->SetName("txn_after_" + std::to_string(i));
-    if (put_s.ok()) {
-      put_s = txn->Put("key" + std::to_string(i), "value" + std::to_string(i));
-    }
-    if (put_s.ok()) {
-      put_s = txn->Prepare();
-    }
-    if (put_s.ok()) {
-      put_s = txn->Commit();
-    }
+    ASSERT_NE(txn, nullptr);
+    ASSERT_OK(txn->SetName("txn_after_" + std::to_string(i)));
+    ASSERT_OK(txn->Put("key" + std::to_string(i), "value" + std::to_string(i)));
+    ASSERT_OK(txn->Prepare());
+    ASSERT_OK(txn->Commit());
     delete txn;
-    // Some writes may fail if recovery is still in progress
-    if (!put_s.ok()) {
-      break;
-    }
   }
 
-  // Close the database
+  // Close and reopen - this would fail with "sequence number going backwards"
+  // before the fix.
   Close();
 
-  // Now try to reopen - this should trigger the bug
-  // The recovery will see sequence numbers going backwards between WAL files
   Status reopen_s = Open();
+  ASSERT_OK(reopen_s);
 
-  // If the bug exists, we expect either:
-  // 1. A Corruption error about sequence numbers going backwards
-  // 2. Or the open might succeed but data integrity is compromised
-  if (!reopen_s.ok()) {
-    // Check if it's the specific error we're looking for
-    std::string error_msg = reopen_s.ToString();
-    bool is_seqno_error =
-        error_msg.find("Sequence number") != std::string::npos &&
-        error_msg.find("backwards") != std::string::npos;
-    if (reopen_s.IsCorruption() && is_seqno_error) {
-      // Bug confirmed - the test passes by demonstrating the bug exists
-      std::cout << "Bug confirmed: " << error_msg << std::endl;
-      // We expect this error - this is the bug we're testing for
-      SUCCEED();
-      return;
-    }
-    // Some other error - fail the test
-    FAIL() << "Unexpected error on reopen: " << error_msg;
-  } else {
-    // If open succeeded, verify data integrity
-    // Check that we can read all the data
-    ReadOptions read_opts;
-    for (int i = 0; i < 20; i++) {
-      std::string value;
-      Status get_s = db_->Get(read_opts, "key" + std::to_string(i), &value);
-      if (!get_s.ok()) {
-        // Data loss detected - also indicates a bug
-        FAIL() << "Data loss detected for key" << i << ": " << get_s.ToString();
-      }
-    }
-
-    // If we get here, the bug may not have been triggered in this run
-    // This could happen due to timing or if the fix is already in place
-    std::cout << "Note: Bug was not triggered in this test run. "
-              << "This may be due to timing or the fix being present."
-              << std::endl;
+  // Verify data integrity
+  ReadOptions read_opts;
+  for (int i = 0; i < 20; i++) {
+    std::string value;
+    ASSERT_OK(db_->Get(read_opts, "key" + std::to_string(i), &value));
+    ASSERT_EQ(value, "value" + std::to_string(i));
   }
 
   Close();
 }
 
-// Test that verifies the sequence number discrepancy directly by checking
-// what sequence number is used when SwitchMemtable is called during
-// error recovery. This test captures the sequence numbers at key points
-// and verifies the discrepancy exists and is fixed.
+// Test that verifies the sequence number discrepancy is resolved by checking
+// that LastSequence >= LastAllocatedSequence after recovery completes.
 TEST_F(WritePreparedTransactionSeqnoTest, SeqnoDiscrepancyDuringErrorRecovery) {
   ASSERT_OK(Open());
 
@@ -293,53 +211,27 @@ TEST_F(WritePreparedTransactionSeqnoTest, SeqnoDiscrepancyDuringErrorRecovery) {
   ASSERT_OK(db_->Flush(FlushOptions()));
 
   // Track sequence numbers at key points
-  std::atomic<uint64_t> last_seq_at_error{0};
-  std::atomic<uint64_t> last_allocated_seq_at_error{0};
   std::atomic<uint64_t> last_seq_after_recovery{0};
   std::atomic<uint64_t> last_allocated_seq_after_recovery{0};
-  std::atomic<uint64_t> memtable_seq_at_switch{0};
-  std::atomic<bool> captured_seqs{false};
   std::atomic<bool> captured_seqs_after{false};
 
-  // We need to capture the sequence numbers when SwitchMemtable is called
-  // during error recovery. The key is to check if there's a gap between
-  // LastSequence() and LastAllocatedSequence().
-
-  std::atomic<bool> inject_error{true};
   IOStatus error_to_inject = IOStatus::IOError("Injected error");
   error_to_inject.SetRetryable(true);
 
-  SyncPoint::GetInstance()->SetCallBack(
-      "VersionSet::LogAndApply:WriteManifest", [&](void*) {
-        if (inject_error.load()) {
-          inject_error.store(false);
-          fault_fs_->SetFilesystemActive(false, error_to_inject);
-        }
-      });
+  // Set up sync point dependency chain for deterministic synchronization
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->LoadDependency(
+      {{"RecoverFromRetryableBGIOError:BeforeStart",
+        "SeqnoDiscrepancyDuringErrorRecovery:0"},
+       {"SeqnoDiscrepancyDuringErrorRecovery:1",
+        "RecoverFromRetryableBGIOError:BeforeWait1"},
+       {"RecoverFromRetryableBGIOError:RecoverSuccess",
+        "SeqnoDiscrepancyDuringErrorRecovery:2"}});
 
-  // Capture sequence numbers when SwitchMemtable is called
   SyncPoint::GetInstance()->SetCallBack(
-      "DBImpl::SwitchMemtable:NewMemtableSeq", [&](void* arg) {
-        uint64_t seq = *reinterpret_cast<uint64_t*>(arg);
-        memtable_seq_at_switch.store(seq);
-      });
+      "VersionSet::LogAndApply:WriteManifest",
+      [&](void*) { fault_fs_->SetFilesystemActive(false, error_to_inject); });
 
-  // Capture last_sequence and last_allocated_sequence before recovery
-  SyncPoint::GetInstance()->SetCallBack(
-      "RecoverFromRetryableBGIOError:BeforeStart", [&](void*) {
-        DBImpl* db_impl = dbimpl();
-        if (db_impl) {
-          // Note: These are internal APIs - we're testing internal behavior
-          VersionSet* vs = db_impl->GetVersionSet();
-          if (vs) {
-            last_seq_at_error.store(vs->LastSequence());
-            last_allocated_seq_at_error.store(vs->LastAllocatedSequence());
-            captured_seqs.store(true);
-          }
-        }
-      });
-
-  // Capture last_sequence and last_allocated_sequence after recovery completes
+  // Capture sequence numbers after recovery completes to verify the fix
   SyncPoint::GetInstance()->SetCallBack(
       "RecoverFromRetryableBGIOError:RecoverSuccess", [&](void*) {
         DBImpl* db_impl = dbimpl();
@@ -356,8 +248,8 @@ TEST_F(WritePreparedTransactionSeqnoTest, SeqnoDiscrepancyDuringErrorRecovery) {
 
   SyncPoint::GetInstance()->EnableProcessing();
 
-  // Write more transactions to create a gap between allocated and published
-  // seqs With two_write_queues=true, sequence numbers are allocated differently
+  // Write more transactions with two_write_queues to potentially create a gap
+  // between allocated and published sequence numbers
   for (int i = 5; i < 10; i++) {
     Transaction* txn = db_->BeginTransaction(write_opts, txn_opts);
     ASSERT_NE(txn, nullptr);
@@ -370,80 +262,42 @@ TEST_F(WritePreparedTransactionSeqnoTest, SeqnoDiscrepancyDuringErrorRecovery) {
 
   // Trigger a flush that will fail
   Status flush_s = db_->Flush(FlushOptions());
-  ASSERT_TRUE(flush_s.severity() == Status::kSoftError || flush_s.IsIOError())
-      << flush_s.ToString();
+  ASSERT_NOK(flush_s);
 
-  // Re-enable filesystem for recovery
+  // Wait for recovery to start, re-enable filesystem, let it proceed
+  TEST_SYNC_POINT("SeqnoDiscrepancyDuringErrorRecovery:0");
   fault_fs_->SetFilesystemActive(true);
+  SyncPoint::GetInstance()->ClearCallBack(
+      "VersionSet::LogAndApply:WriteManifest");
+  TEST_SYNC_POINT("SeqnoDiscrepancyDuringErrorRecovery:1");
 
   // Wait for recovery to complete
-  env_->SleepForMicroseconds(2000000);  // 2 seconds
-
+  TEST_SYNC_POINT("SeqnoDiscrepancyDuringErrorRecovery:2");
   SyncPoint::GetInstance()->DisableProcessing();
-  SyncPoint::GetInstance()->ClearAllCallBacks();
 
-  // Check if we captured the sequence numbers and if there's a discrepancy
-  if (captured_seqs.load()) {
-    uint64_t last_seq = last_seq_at_error.load();
-    uint64_t last_alloc_seq = last_allocated_seq_at_error.load();
+  // Verify that sequences were captured and are in sync after recovery
+  ASSERT_TRUE(captured_seqs_after.load());
+  ASSERT_GE(last_seq_after_recovery.load(),
+            last_allocated_seq_after_recovery.load())
+      << "LastSequence should be >= LastAllocatedSequence after recovery";
 
-    std::cout << "At error recovery start (BEFORE fix):" << std::endl;
-    std::cout << "  LastSequence (published): " << last_seq << std::endl;
-    std::cout << "  LastAllocatedSequence: " << last_alloc_seq << std::endl;
-
-    if (last_alloc_seq > last_seq) {
-      std::cout << "  DISCREPANCY DETECTED: allocated > published by "
-                << (last_alloc_seq - last_seq) << std::endl;
-      // This is the bug - if SwitchMemtable uses last_seq instead of
-      // last_alloc_seq, new WAL entries could have lower sequence numbers
-      // than what was already allocated.
-    }
-
-    if (memtable_seq_at_switch.load() > 0) {
-      std::cout << "  New memtable sequence: " << memtable_seq_at_switch.load()
-                << std::endl;
-    }
-  }
-
-  // Verify the fix worked - after recovery, sequences should be synced
-  if (captured_seqs_after.load()) {
-    uint64_t last_seq = last_seq_after_recovery.load();
-    uint64_t last_alloc_seq = last_allocated_seq_after_recovery.load();
-
-    std::cout << "After error recovery (AFTER fix):" << std::endl;
-    std::cout << "  LastSequence (published): " << last_seq << std::endl;
-    std::cout << "  LastAllocatedSequence: " << last_alloc_seq << std::endl;
-
-    if (last_alloc_seq > last_seq) {
-      std::cout << "  WARNING: Still discrepancy after recovery! "
-                << "allocated > published by " << (last_alloc_seq - last_seq)
-                << std::endl;
-    } else {
-      std::cout << "  FIX VERIFIED: sequences are now in sync" << std::endl;
-    }
-  }
-
-  // Final verification: close and reopen should succeed without corruption
+  // Close and reopen should succeed without corruption
   Close();
+  ASSERT_OK(Open());
 
-  Status reopen_s = Open();
-  if (!reopen_s.ok()) {
-    std::string error_msg = reopen_s.ToString();
-    if (error_msg.find("Sequence number") != std::string::npos &&
-        error_msg.find("backwards") != std::string::npos) {
-      FAIL() << "Bug still present after fix: " << error_msg;
-    }
-    FAIL() << "Unexpected error on reopen: " << error_msg;
+  // Verify data integrity
+  ReadOptions read_opts;
+  for (int i = 0; i < 10; i++) {
+    std::string value;
+    ASSERT_OK(db_->Get(read_opts, "key" + std::to_string(i), &value));
+    ASSERT_EQ(value, "value" + std::to_string(i));
   }
 
-  std::cout << "SUCCESS: DB reopened without sequence number corruption"
-            << std::endl;
   Close();
 }
 
-// More rigorous test that uses concurrent threads to create a window
-// where allocated sequence numbers are not yet published, then triggers
-// error recovery during that window.
+// Test that verifies SyncLastSequenceWithAllocated is called during ResumeImpl
+// by checking sequence numbers before and after the sync point.
 TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
   ASSERT_OK(Open());
 
@@ -462,18 +316,7 @@ TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
   }
   ASSERT_OK(db_->Flush(FlushOptions()));
 
-  // Get initial sequence numbers
-  uint64_t initial_last_seq = dbimpl()->GetVersionSet()->LastSequence();
-  uint64_t initial_alloc_seq =
-      dbimpl()->GetVersionSet()->LastAllocatedSequence();
-  std::cout << "Initial state:" << std::endl;
-  std::cout << "  LastSequence: " << initial_last_seq << std::endl;
-  std::cout << "  LastAllocatedSequence: " << initial_alloc_seq << std::endl;
-
-  // Set up to inject error and track recovery
-  std::atomic<bool> inject_error{true};
-  std::atomic<bool> recovery_started{false};
-  std::atomic<bool> recovery_completed{false};
+  // Track sequence numbers at key points during recovery
   std::atomic<uint64_t> seq_before_resume{0};
   std::atomic<uint64_t> alloc_seq_before_resume{0};
   std::atomic<uint64_t> seq_after_resume{0};
@@ -482,19 +325,20 @@ TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
   IOStatus error_to_inject = IOStatus::IOError("Injected error");
   error_to_inject.SetRetryable(true);
 
-  SyncPoint::GetInstance()->SetCallBack(
-      "VersionSet::LogAndApply:WriteManifest", [&](void*) {
-        if (inject_error.load()) {
-          inject_error.store(false);
-          fault_fs_->SetFilesystemActive(false, error_to_inject);
-        }
-      });
+  // Set up sync point dependency chain for deterministic synchronization
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->LoadDependency(
+      {{"RecoverFromRetryableBGIOError:BeforeStart",
+        "ConcurrentWritesDuringErrorRecovery:0"},
+       {"ConcurrentWritesDuringErrorRecovery:1",
+        "RecoverFromRetryableBGIOError:BeforeWait1"},
+       {"RecoverFromRetryableBGIOError:RecoverSuccess",
+        "ConcurrentWritesDuringErrorRecovery:2"}});
 
   SyncPoint::GetInstance()->SetCallBack(
-      "RecoverFromRetryableBGIOError:BeforeStart",
-      [&](void*) { recovery_started.store(true); });
+      "VersionSet::LogAndApply:WriteManifest",
+      [&](void*) { fault_fs_->SetFilesystemActive(false, error_to_inject); });
 
-  // Capture sequences right before ResumeImpl is called
+  // Capture sequences right before ResumeImpl runs the sync
   SyncPoint::GetInstance()->SetCallBack("DBImpl::ResumeImpl:Start", [&](void*) {
     DBImpl* db_impl = dbimpl();
     if (db_impl) {
@@ -506,7 +350,7 @@ TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
     }
   });
 
-  // Capture sequences right after ResumeImpl syncs them (if fix is present)
+  // Capture sequences right after ResumeImpl syncs them
   SyncPoint::GetInstance()->SetCallBack(
       "DBImpl::ResumeImpl:AfterSyncSeq", [&](void*) {
         DBImpl* db_impl = dbimpl();
@@ -518,10 +362,6 @@ TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
           }
         }
       });
-
-  SyncPoint::GetInstance()->SetCallBack(
-      "RecoverFromRetryableBGIOError:RecoverSuccess",
-      [&](void*) { recovery_completed.store(true); });
 
   SyncPoint::GetInstance()->EnableProcessing();
 
@@ -538,60 +378,37 @@ TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
 
   // Trigger a flush that will fail
   Status flush_s = db_->Flush(FlushOptions());
-  ASSERT_TRUE(flush_s.severity() == Status::kSoftError || flush_s.IsIOError())
-      << flush_s.ToString();
+  ASSERT_NOK(flush_s);
 
-  // Re-enable filesystem for recovery
+  // Wait for recovery to start, re-enable filesystem, let it proceed
+  TEST_SYNC_POINT("ConcurrentWritesDuringErrorRecovery:0");
   fault_fs_->SetFilesystemActive(true);
+  SyncPoint::GetInstance()->ClearCallBack(
+      "VersionSet::LogAndApply:WriteManifest");
+  TEST_SYNC_POINT("ConcurrentWritesDuringErrorRecovery:1");
 
-  // Wait for recovery
-  env_->SleepForMicroseconds(2000000);
-
+  // Wait for recovery to complete
+  TEST_SYNC_POINT("ConcurrentWritesDuringErrorRecovery:2");
   SyncPoint::GetInstance()->DisableProcessing();
-  SyncPoint::GetInstance()->ClearAllCallBacks();
 
-  // Print captured values
-  if (seq_before_resume.load() > 0) {
-    std::cout << "Before ResumeImpl:" << std::endl;
-    std::cout << "  LastSequence: " << seq_before_resume.load() << std::endl;
-    std::cout << "  LastAllocatedSequence: " << alloc_seq_before_resume.load()
-              << std::endl;
-    if (alloc_seq_before_resume.load() > seq_before_resume.load()) {
-      std::cout << "  Gap: "
-                << (alloc_seq_before_resume.load() - seq_before_resume.load())
-                << " (this gap would cause corruption without fix)"
-                << std::endl;
-    }
-  }
-
-  if (seq_after_resume.load() > 0) {
-    std::cout << "After ResumeImpl sync:" << std::endl;
-    std::cout << "  LastSequence: " << seq_after_resume.load() << std::endl;
-    std::cout << "  LastAllocatedSequence: " << alloc_seq_after_resume.load()
-              << std::endl;
-    ASSERT_EQ(seq_after_resume.load(), alloc_seq_after_resume.load())
-        << "Fix should have synced sequences";
-  }
-
-  // Verify recovery completed
-  ASSERT_TRUE(recovery_started.load()) << "Recovery did not start";
+  // Verify that the AfterSyncSeq callback fired and sequences are in sync
+  ASSERT_GT(seq_after_resume.load(), 0u)
+      << "DBImpl::ResumeImpl:AfterSyncSeq callback should have fired";
+  ASSERT_EQ(seq_after_resume.load(), alloc_seq_after_resume.load())
+      << "Fix should have synced sequences";
 
   // Close and reopen
   Close();
-
-  Status reopen_s = Open();
-  ASSERT_OK(reopen_s) << "Reopen failed: " << reopen_s.ToString();
+  ASSERT_OK(Open());
 
   // Verify data integrity
   ReadOptions read_opts;
   for (int i = 0; i < 10; i++) {
     std::string value;
-    Status get_s = db_->Get(read_opts, "key" + std::to_string(i), &value);
-    ASSERT_OK(get_s) << "Failed to read key" << i;
+    ASSERT_OK(db_->Get(read_opts, "key" + std::to_string(i), &value));
     ASSERT_EQ(value, "value" + std::to_string(i));
   }
 
-  std::cout << "SUCCESS: All data verified after reopen" << std::endl;
   Close();
 }
 

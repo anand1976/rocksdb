@@ -1445,6 +1445,9 @@ class VersionSet {
   // is complete, but only publish via SetLastSequence() after success.
   // If an error occurs and recovery creates new memtables, SwitchMemtable
   // uses LastSequence() which may be lower than already-allocated sequences.
+  //
+  // REQUIRED: DB mutex is held and no concurrent writers are active (i.e.,
+  // after WaitForBackgroundWork() in ResumeImpl).
   void SyncLastSequenceWithAllocated() {
     uint64_t alloc_seq =
         last_allocated_sequence_.load(std::memory_order_seq_cst);
@@ -1735,6 +1738,9 @@ class VersionSet {
   // The last sequence number of data committed to the descriptor (manifest
   // file).
   SequenceNumber descriptor_last_sequence_ = 0;
+  // See write_prepared_txn.h for a more detailed description of how Write
+  // Prepared transactions work, with concrete examples.
+  //
   // The last seq that is already allocated. It is applicable only when we have
   // two write queues. In that case seq might or might not have appreated in
   // memtable but it is expected to appear in the WAL.
