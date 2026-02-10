@@ -210,6 +210,20 @@ TEST_F(WritePreparedTransactionSeqnoTest, SeqnoDiscrepancyDuringErrorRecovery) {
   }
   ASSERT_OK(db_->Flush(FlushOptions()));
 
+  // Write more transactions with two_write_queues to potentially create a gap
+  // between allocated and published sequence numbers. These must be written
+  // before installing the error injection callback, since the small write
+  // buffer (4KB) could trigger an automatic flush during these writes.
+  for (int i = 5; i < 10; i++) {
+    Transaction* txn = db_->BeginTransaction(write_opts, txn_opts);
+    ASSERT_NE(txn, nullptr);
+    ASSERT_OK(txn->SetName("txn" + std::to_string(i)));
+    ASSERT_OK(txn->Put("key" + std::to_string(i), "value" + std::to_string(i)));
+    ASSERT_OK(txn->Prepare());
+    ASSERT_OK(txn->Commit());
+    delete txn;
+  }
+
   // Track sequence numbers at key points
   std::atomic<uint64_t> last_seq_after_recovery{0};
   std::atomic<uint64_t> last_allocated_seq_after_recovery{0};
@@ -247,18 +261,6 @@ TEST_F(WritePreparedTransactionSeqnoTest, SeqnoDiscrepancyDuringErrorRecovery) {
       });
 
   SyncPoint::GetInstance()->EnableProcessing();
-
-  // Write more transactions with two_write_queues to potentially create a gap
-  // between allocated and published sequence numbers
-  for (int i = 5; i < 10; i++) {
-    Transaction* txn = db_->BeginTransaction(write_opts, txn_opts);
-    ASSERT_NE(txn, nullptr);
-    ASSERT_OK(txn->SetName("txn" + std::to_string(i)));
-    ASSERT_OK(txn->Put("key" + std::to_string(i), "value" + std::to_string(i)));
-    ASSERT_OK(txn->Prepare());
-    ASSERT_OK(txn->Commit());
-    delete txn;
-  }
 
   // Trigger a flush that will fail
   Status flush_s = db_->Flush(FlushOptions());
@@ -316,6 +318,19 @@ TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
   }
   ASSERT_OK(db_->Flush(FlushOptions()));
 
+  // Write more transactions. These must be written before installing the error
+  // injection callback, since the small write buffer (4KB) could trigger an
+  // automatic flush during these writes.
+  for (int i = 5; i < 10; i++) {
+    Transaction* txn = db_->BeginTransaction(write_opts, txn_opts);
+    ASSERT_NE(txn, nullptr);
+    ASSERT_OK(txn->SetName("txn" + std::to_string(i)));
+    ASSERT_OK(txn->Put("key" + std::to_string(i), "value" + std::to_string(i)));
+    ASSERT_OK(txn->Prepare());
+    ASSERT_OK(txn->Commit());
+    delete txn;
+  }
+
   // Track sequence numbers at key points during recovery
   std::atomic<uint64_t> seq_before_resume{0};
   std::atomic<uint64_t> alloc_seq_before_resume{0};
@@ -364,17 +379,6 @@ TEST_F(WritePreparedTransactionSeqnoTest, ConcurrentWritesDuringErrorRecovery) {
       });
 
   SyncPoint::GetInstance()->EnableProcessing();
-
-  // Write more transactions
-  for (int i = 5; i < 10; i++) {
-    Transaction* txn = db_->BeginTransaction(write_opts, txn_opts);
-    ASSERT_NE(txn, nullptr);
-    ASSERT_OK(txn->SetName("txn" + std::to_string(i)));
-    ASSERT_OK(txn->Put("key" + std::to_string(i), "value" + std::to_string(i)));
-    ASSERT_OK(txn->Prepare());
-    ASSERT_OK(txn->Commit());
-    delete txn;
-  }
 
   // Trigger a flush that will fail
   Status flush_s = db_->Flush(FlushOptions());
